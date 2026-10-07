@@ -11,6 +11,7 @@ import (
 	"heatpulse/internal/audit"
 	"heatpulse/internal/hydraulic"
 	"heatpulse/internal/network"
+	"heatpulse/internal/timeline"
 )
 
 type Command struct {
@@ -25,12 +26,13 @@ type Command struct {
 type Service struct {
 	interlock *hydraulic.Interlock
 	audit     *audit.Recorder
+	timeline  *timeline.Recorder
 	mu        sync.RWMutex
 	commands  map[string]Command
 }
 
-func NewService(interlock *hydraulic.Interlock, recorder *audit.Recorder) *Service {
-	return &Service{interlock: interlock, audit: recorder, commands: make(map[string]Command)}
+func NewService(interlock *hydraulic.Interlock, recorder *audit.Recorder, timeline *timeline.Recorder) *Service {
+	return &Service{interlock: interlock, audit: recorder, timeline: timeline, commands: make(map[string]Command)}
 }
 
 func (s *Service) SetStage(ctx context.Context, zoneID string, stage int, actor string) (network.Zone, Command, error) {
@@ -41,11 +43,15 @@ func (s *Service) SetStage(ctx context.Context, zoneID string, stage int, actor 
 	s.mu.Lock()
 	s.commands[command.ID] = command
 	s.mu.Unlock()
+	before, _ := s.interlock.Snapshot(zoneID)
 	zone, err := s.interlock.StagePump(zoneID, stage)
 	if err != nil {
 		command.Status = "rejected"
 		s.save(command)
 		_ = s.audit.Rejected("pump.stage", zoneID, actor, err.Error(), map[string]any{"command_id": command.ID, "stage": stage})
+		_, _ = s.timeline.Record(timeline.KindPumpCommand, zoneID, command.ID, "pump stage rejected: "+err.Error(),
+			map[string]any{"pump_stage": before.PumpStage},
+			map[string]any{"pump_stage": before.PumpStage, "command_status": "rejected"})
 		return network.Zone{}, command, err
 	}
 	command.Status = "applied"
@@ -54,6 +60,9 @@ func (s *Service) SetStage(ctx context.Context, zoneID string, stage int, actor 
 	if err := s.audit.Accepted("pump.stage", zoneID, actor, "pump stage applied", map[string]any{"command_id": command.ID, "stage": stage}); err != nil {
 		return network.Zone{}, command, fmt.Errorf("record pump command: %w", err)
 	}
+	_, _ = s.timeline.Record(timeline.KindPumpCommand, zoneID, command.ID, "pump stage applied",
+		map[string]any{"pump_stage": before.PumpStage},
+		map[string]any{"pump_stage": zone.PumpStage, "command_status": "applied"})
 	return zone, command, nil
 }
 

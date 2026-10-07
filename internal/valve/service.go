@@ -10,6 +10,7 @@ import (
 	"heatpulse/internal/audit"
 	"heatpulse/internal/hydraulic"
 	"heatpulse/internal/network"
+	"heatpulse/internal/timeline"
 )
 
 type Command struct {
@@ -24,12 +25,13 @@ type Command struct {
 type Service struct {
 	interlock *hydraulic.Interlock
 	audit     *audit.Recorder
+	timeline  *timeline.Recorder
 	mu        sync.RWMutex
 	commands  map[string]Command
 }
 
-func NewService(interlock *hydraulic.Interlock, recorder *audit.Recorder) *Service {
-	return &Service{interlock: interlock, audit: recorder, commands: make(map[string]Command)}
+func NewService(interlock *hydraulic.Interlock, recorder *audit.Recorder, timeline *timeline.Recorder) *Service {
+	return &Service{interlock: interlock, audit: recorder, timeline: timeline, commands: make(map[string]Command)}
 }
 
 func (s *Service) SetBypass(ctx context.Context, zoneID, valveID string, open bool, actor string) (network.Zone, Command, error) {
@@ -38,11 +40,15 @@ func (s *Service) SetBypass(ctx context.Context, zoneID, valveID string, open bo
 	}
 	command := Command{ID: uuid.NewString(), ValveID: valveID, ZoneID: zoneID, Open: open, Status: "pending", CreatedAt: time.Now().UTC()}
 	s.store(command)
+	before, _ := s.interlock.Snapshot(zoneID)
 	zone, err := s.interlock.SetBypass(zoneID, open)
 	if err != nil {
 		command.Status = "rejected"
 		s.store(command)
 		_ = s.audit.Rejected("valve.bypass", zoneID, actor, err.Error(), map[string]any{"command_id": command.ID, "open": open})
+		_, _ = s.timeline.Record(timeline.KindValveCommand, zoneID, command.ID, "bypass command rejected: "+err.Error(),
+			map[string]any{"bypass_open": before.BypassOpen},
+			map[string]any{"bypass_open": before.BypassOpen, "command_status": "rejected"})
 		return network.Zone{}, command, err
 	}
 	command.Status = "applied"
@@ -50,6 +56,9 @@ func (s *Service) SetBypass(ctx context.Context, zoneID, valveID string, open bo
 	if err := s.audit.Accepted("valve.bypass", zoneID, actor, "bypass position applied", map[string]any{"command_id": command.ID, "open": open}); err != nil {
 		return network.Zone{}, command, err
 	}
+	_, _ = s.timeline.Record(timeline.KindValveCommand, zoneID, command.ID, "bypass position applied",
+		map[string]any{"bypass_open": before.BypassOpen},
+		map[string]any{"bypass_open": zone.BypassOpen, "command_status": "applied"})
 	return zone, command, nil
 }
 

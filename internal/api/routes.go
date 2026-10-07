@@ -16,6 +16,8 @@ func (a *App) Handler() http.Handler {
 	console.Register(router)
 	router.Route("/api/v1", func(api chi.Router) {
 		api.Get("/overview", a.overview)
+		api.Get("/timeline", a.listTimeline)
+		api.Get("/timeline/rebuild", a.rebuildTimeline)
 		api.Get("/zones", a.listZones)
 		api.Post("/zones/{zoneID}/pump-stage", a.setPumpStage)
 		api.Post("/zones/{zoneID}/bypass", a.setBypass)

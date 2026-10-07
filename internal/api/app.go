@@ -17,6 +17,7 @@ import (
 	"heatpulse/internal/station"
 	"heatpulse/internal/store"
 	"heatpulse/internal/telemetry"
+	"heatpulse/internal/timeline"
 	"heatpulse/internal/valve"
 )
 
@@ -25,6 +26,7 @@ type App struct {
 	Events               *store.EventLog
 	Audit                *audit.Recorder
 	AuditQuery           *audit.Query
+	Timeline             *timeline.Store
 	Network              *network.State
 	Topology             *network.Topology
 	NetworkRegistry      *network.Registry
@@ -88,6 +90,16 @@ func NewApp(dataDirectory string) (*App, error) {
 		{ID: "xijiao", Name: "西郊站", ZoneID: "west", Online: true, TargetCelsius: 65, TargetRevision: 1, ControllerEpoch: 1, Exchangers: map[string]station.ExchangerPhase{"A": station.ExchangerCarrying, "B": station.ExchangerStandby}},
 	}
 	stations := station.NewRegistry(stationItems)
+	timelineStore, err := timeline.OpenStore(filepath.Join(dataDirectory, "timeline.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	timelineRecorder := timeline.NewRecorder(timelineStore, func(stationID string) string {
+		if item, ok := stations.Get(stationID); ok {
+			return item.ZoneID
+		}
+		return ""
+	})
 	networkRegistry := network.NewRegistry([]network.StationBinding{
 		{StationID: "xincheng", ZoneID: "north", Required: true},
 		{StationID: "binhe", ZoneID: "east", Required: true},
@@ -106,20 +118,21 @@ func NewApp(dataDirectory string) (*App, error) {
 	warmup := exchanger.NewWarmupService(stations)
 	relief := valve.NewReliefService(2 * time.Millisecond)
 	boundaries := valve.NewBoundaryService()
-	isolationService := isolation.NewService(topology, networkState, relief, boundaries, recorder)
-	targets := station.NewTargetService(stations)
+	isolationService := isolation.NewService(topology, networkState, relief, boundaries, recorder, timelineRecorder)
+	targets := station.NewTargetService(stations, timelineRecorder)
 	planner := dispatch.NewPlanner(targets)
 	dispatchBuffer := dispatch.NewBuffer()
 	stationCommands := station.NewCommandService(stations)
 	app := &App{
 		DataDirectory: dataDirectory, Events: events, Audit: recorder, AuditQuery: audit.NewQuery(events),
-		Network: networkState, Topology: topology, NetworkRegistry: networkRegistry, Stations: stations,
-		Snapshots: snapshots, Interlock: interlock, Pumps: pump.NewService(interlock, recorder),
-		PumpRunner: pumpRunner, Pressure: pressure, Valves: valve.NewService(interlock, recorder),
+		Timeline: timelineStore,
+		Network:  networkState, Topology: topology, NetworkRegistry: networkRegistry, Stations: stations,
+		Snapshots: snapshots, Interlock: interlock, Pumps: pump.NewService(interlock, recorder, timelineRecorder),
+		PumpRunner: pumpRunner, Pressure: pressure, Valves: valve.NewService(interlock, recorder, timelineRecorder),
 		ValveOperations: valveOperations, Relief: relief, Boundaries: boundaries, Primary: primary,
 		Telemetry: telemetry.NewSeries(128), FlowReceipts: flowReceipts,
 		Balancer: hydraulic.NewBalancer(0.28), LeakDetector: hydraulic.NewLeakDetector(),
-		Protection: protection.NewService(), Latches: protection.NewLatchStore(snapshots),
+		Protection: protection.NewService(), Latches: protection.NewLatchStore(snapshots, timelineRecorder),
 		Frost: protection.NewFrostProtection(valveOperations), Circulation: circulation, Antifreeze: antifreeze,
 		Warmup: warmup, Isolation: isolationService, IsolationCoordinator: isolation.NewCoordinator(isolationService),
 		Targets: targets, Planner: planner, DispatchBuffer: dispatchBuffer, StationCommands: stationCommands,
@@ -130,7 +143,7 @@ func NewApp(dataDirectory string) (*App, error) {
 	app.ExchangerSwitch = exchanger.NewSwitchService(stations, flowReceipts, primary)
 	app.Publisher = dispatch.NewPublisher(planner, targets, recorder)
 	app.Reconnector = recovery.NewReconnector(dispatchBuffer, stations, stationCommands, recorder)
-	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, networkRegistry, warmup, pressure)
+	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, networkRegistry, warmup, pressure, timelineRecorder)
 	if err := app.seed(); err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 
 	"heatpulse/internal/audit"
 	"heatpulse/internal/network"
+	"heatpulse/internal/timeline"
 	"heatpulse/internal/valve"
 )
 
@@ -40,12 +41,13 @@ type Service struct {
 	relief     *valve.ReliefService
 	boundaries *valve.BoundaryService
 	audit      *audit.Recorder
+	timeline   *timeline.Recorder
 	mu         sync.RWMutex
 	sessions   map[string]Session
 }
 
-func NewService(topology *network.Topology, state *network.State, relief *valve.ReliefService, boundaries *valve.BoundaryService, recorder *audit.Recorder) *Service {
-	return &Service{topology: topology, state: state, relief: relief, boundaries: boundaries, audit: recorder, sessions: make(map[string]Session)}
+func NewService(topology *network.Topology, state *network.State, relief *valve.ReliefService, boundaries *valve.BoundaryService, recorder *audit.Recorder, timeline *timeline.Recorder) *Service {
+	return &Service{topology: topology, state: state, relief: relief, boundaries: boundaries, audit: recorder, timeline: timeline, sessions: make(map[string]Session)}
 }
 
 func (s *Service) Isolate(ctx context.Context, sectionID, actor string) (Session, error) {
@@ -58,6 +60,10 @@ func (s *Service) Isolate(ctx context.Context, sectionID, actor string) (Session
 		Status: StatusOpeningRelief, StartedAt: time.Now().UTC(), Boundaries: make([]valve.BoundaryProof, 0, len(section.BoundaryValves)),
 	}
 	s.save(session)
+	before := map[string]any{}
+	if zone, ok := s.state.Get(section.ZoneID); ok {
+		before["phase"] = string(zone.Phase)
+	}
 	if _, err := s.state.Update(section.ZoneID, func(zone *network.Zone) error {
 		zone.Phase = network.PhaseIsolating
 		return nil
@@ -91,6 +97,9 @@ func (s *Service) Isolate(ctx context.Context, sectionID, actor string) (Session
 	if err := s.audit.Accepted("isolation.complete", sectionID, actor, "section safely isolated", map[string]any{"session_id": session.ID}); err != nil {
 		return session, err
 	}
+	_, _ = s.timeline.Record(timeline.KindIsolation, session.ZoneID, sectionID, "section safely isolated",
+		before,
+		map[string]any{"phase": string(network.PhaseIsolated), "isolation_status": string(session.Status), "session_id": session.ID})
 	return session, nil
 }
 
@@ -100,6 +109,9 @@ func (s *Service) fail(session Session, cause error) (Session, error) {
 	session.CompletedAt = time.Now().UTC()
 	s.save(session)
 	_ = s.audit.Rejected("isolation.failed", session.SectionID, "system", cause.Error(), map[string]any{"session_id": session.ID})
+	_, _ = s.timeline.Record(timeline.KindIsolation, session.ZoneID, session.SectionID, "isolation failed: "+cause.Error(),
+		nil,
+		map[string]any{"isolation_status": string(session.Status), "session_id": session.ID})
 	return session, fmt.Errorf("isolation %s: %w", session.ID, cause)
 }
 

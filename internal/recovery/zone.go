@@ -7,6 +7,7 @@ import (
 	"heatpulse/internal/exchanger"
 	"heatpulse/internal/network"
 	"heatpulse/internal/pump"
+	"heatpulse/internal/timeline"
 )
 
 type ZoneRecovery struct {
@@ -14,23 +15,32 @@ type ZoneRecovery struct {
 	registry  *network.Registry
 	warmup    *exchanger.WarmupService
 	pressure  *pump.PressureMonitor
+	timeline  *timeline.Recorder
 	mu        sync.Mutex
 	connected map[string]map[string]bool
 }
 
-func NewZoneRecovery(state *network.State, registry *network.Registry, warmup *exchanger.WarmupService, pressure *pump.PressureMonitor) *ZoneRecovery {
-	return &ZoneRecovery{state: state, registry: registry, warmup: warmup, pressure: pressure, connected: make(map[string]map[string]bool)}
+func NewZoneRecovery(state *network.State, registry *network.Registry, warmup *exchanger.WarmupService, pressure *pump.PressureMonitor, timeline *timeline.Recorder) *ZoneRecovery {
+	return &ZoneRecovery{state: state, registry: registry, warmup: warmup, pressure: pressure, timeline: timeline, connected: make(map[string]map[string]bool)}
 }
 
 func (r *ZoneRecovery) Begin(zoneID string) (network.Zone, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.connected[zoneID] = make(map[string]bool)
-	return r.state.Update(zoneID, func(zone *network.Zone) error {
+	before, _ := r.state.Get(zoneID)
+	zone, err := r.state.Update(zoneID, func(zone *network.Zone) error {
 		zone.RecoveryRevision++
 		zone.Phase = network.PhaseWarming
 		return nil
 	})
+	if err != nil {
+		return zone, err
+	}
+	_, _ = r.timeline.Record(timeline.KindRecovery, zoneID, zoneID, "zone recovery started",
+		map[string]any{"phase": string(before.Phase), "recovery_revision": before.RecoveryRevision},
+		map[string]any{"phase": string(zone.Phase), "recovery_revision": zone.RecoveryRevision})
+	return zone, nil
 }
 
 func (r *ZoneRecovery) OnConnected(zoneID, stationID string) (network.Zone, error) {
@@ -59,7 +69,14 @@ func (r *ZoneRecovery) evaluate(zoneID string) (network.Zone, error) {
 			return zone, nil
 		}
 	}
-	return r.state.Activate(zoneID, zone.RecoveryRevision)
+	activated, err := r.state.Activate(zoneID, zone.RecoveryRevision)
+	if err != nil {
+		return activated, err
+	}
+	_, _ = r.timeline.Record(timeline.KindRecovery, zoneID, zoneID, "zone recovered to active",
+		map[string]any{"phase": string(zone.Phase), "recovery_revision": zone.RecoveryRevision},
+		map[string]any{"phase": string(activated.Phase), "recovery_revision": activated.RecoveryRevision})
+	return activated, nil
 }
 
 func (r *ZoneRecovery) Readiness(zoneID string) map[string]map[string]bool {
