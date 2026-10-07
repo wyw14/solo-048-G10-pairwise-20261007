@@ -26,7 +26,45 @@ function pageContent(data) {
   return data.plans.length ? data.plans.map((plan) => panel(plan.id.slice(0, 8), [["状态", plan.status], ["来源 revision", plan.source_revision], ["站点数", Object.keys(plan.targets || {}).length], ["说明", plan.message || "-"]])).join("") : panel("等待调度计划", [["当前 revision", Math.max(...data.stations.map((station) => station.target_revision))], ["人工保持", data.stations.filter((station) => station.hold).length]]);
 }
 
+function timelineMetrics(data) {
+  const missing = data.partitions.reduce((total, partition) => total + (partition.missing || []).length, 0);
+  const outOfOrder = data.partitions.reduce((total, partition) => total + partition.out_of_order, 0);
+  return [["分区", data.partitions.length], ["事件", data.records.length], ["缺失水印", missing], ["乱序记录", outOfOrder]]
+    .map(([name, value]) => `<div class="metric"><span>${name}</span><strong>${value}</strong></div>`).join("");
+}
+
+function timelineContent(data) {
+  if (!data.records.length) return panel("暂无运维事件", [["提示", "泵阀、锁存、隔离、恢复与目标变更会在此串联"]]);
+  return data.records.slice().reverse().map((record) => {
+    const flags = [];
+    if (record.marks && record.marks.length) flags.push("乱序");
+    if (record.missing_before && record.missing_before.length) flags.push("前置缺失 " + record.missing_before.join("/"));
+    return panel(`${record.partition} #${record.watermark} ${record.kind}`, [
+      ["时间", record.at],
+      ["实体", record.entity_id],
+      ["摘要", record.summary],
+      ["标记", flags.length ? flags.join("，") : "完整"],
+    ]);
+  }).join("");
+}
+
+async function loadTimeline() {
+  const connection = document.querySelector("#connection");
+  try {
+    const response = await fetch("/api/v1/timeline", { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "request failed");
+    document.querySelector("#summary").innerHTML = timelineMetrics(payload.data);
+    document.querySelector("#content").innerHTML = timelineContent(payload.data);
+    connection.textContent = "实时连接";
+  } catch (error) {
+    connection.textContent = "连接异常";
+    document.querySelector("#content").innerHTML = panel("无法加载时间线", [["错误", error.message]]);
+  }
+}
+
 async function load() {
+  if (page === "timeline") return loadTimeline();
   const connection = document.querySelector("#connection");
   try {
     const response = await fetch("/api/v1/overview", { cache: "no-store" });

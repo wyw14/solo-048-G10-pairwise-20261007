@@ -17,6 +17,7 @@ import (
 	"heatpulse/internal/station"
 	"heatpulse/internal/store"
 	"heatpulse/internal/telemetry"
+	"heatpulse/internal/timeline"
 	"heatpulse/internal/valve"
 )
 
@@ -63,11 +64,18 @@ type App struct {
 	ZoneRecovery         *recovery.ZoneRecovery
 	Manual               *station.ManualService
 	Maintenance          *station.MaintenanceService
+	Timeline             *timeline.Recorder
+	TimelineStore        *timeline.Store
 }
 
 func NewApp(dataDirectory string) (*App, error) {
 	events := store.NewEventLog(filepath.Join(dataDirectory, "events.jsonl"))
 	recorder := audit.NewRecorder(events)
+	timelineStore, err := timeline.OpenStore(filepath.Join(dataDirectory, "timeline.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	timelineRecorder := timeline.NewRecorder(timelineStore)
 	zones := []network.Zone{
 		{ID: "north", Name: "北环", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.82, ReturnPressure: 0.48},
 		{ID: "east", Name: "东支线", Phase: network.PhaseActive, PumpStage: 2, BypassOpen: true, SupplyPressure: 0.76, ReturnPressure: 0.45},
@@ -106,20 +114,20 @@ func NewApp(dataDirectory string) (*App, error) {
 	warmup := exchanger.NewWarmupService(stations)
 	relief := valve.NewReliefService(2 * time.Millisecond)
 	boundaries := valve.NewBoundaryService()
-	isolationService := isolation.NewService(topology, networkState, relief, boundaries, recorder)
-	targets := station.NewTargetService(stations)
+	isolationService := isolation.NewService(topology, networkState, relief, boundaries, recorder, timelineRecorder)
+	targets := station.NewTargetService(stations, timelineRecorder)
 	planner := dispatch.NewPlanner(targets)
 	dispatchBuffer := dispatch.NewBuffer()
 	stationCommands := station.NewCommandService(stations)
 	app := &App{
 		DataDirectory: dataDirectory, Events: events, Audit: recorder, AuditQuery: audit.NewQuery(events),
 		Network: networkState, Topology: topology, NetworkRegistry: networkRegistry, Stations: stations,
-		Snapshots: snapshots, Interlock: interlock, Pumps: pump.NewService(interlock, recorder),
-		PumpRunner: pumpRunner, Pressure: pressure, Valves: valve.NewService(interlock, recorder),
+		Snapshots: snapshots, Interlock: interlock, Pumps: pump.NewService(interlock, recorder, timelineRecorder),
+		PumpRunner: pumpRunner, Pressure: pressure, Valves: valve.NewService(interlock, recorder, timelineRecorder),
 		ValveOperations: valveOperations, Relief: relief, Boundaries: boundaries, Primary: primary,
 		Telemetry: telemetry.NewSeries(128), FlowReceipts: flowReceipts,
 		Balancer: hydraulic.NewBalancer(0.28), LeakDetector: hydraulic.NewLeakDetector(),
-		Protection: protection.NewService(), Latches: protection.NewLatchStore(snapshots),
+		Protection: protection.NewService(), Latches: protection.NewLatchStore(snapshots, timelineRecorder),
 		Frost: protection.NewFrostProtection(valveOperations), Circulation: circulation, Antifreeze: antifreeze,
 		Warmup: warmup, Isolation: isolationService, IsolationCoordinator: isolation.NewCoordinator(isolationService),
 		Targets: targets, Planner: planner, DispatchBuffer: dispatchBuffer, StationCommands: stationCommands,
@@ -129,8 +137,17 @@ func NewApp(dataDirectory string) (*App, error) {
 	app.LeakProtection = protection.NewLeakProtection(app.LeakDetector)
 	app.ExchangerSwitch = exchanger.NewSwitchService(stations, flowReceipts, primary)
 	app.Publisher = dispatch.NewPublisher(planner, targets, recorder)
-	app.Reconnector = recovery.NewReconnector(dispatchBuffer, stations, stationCommands, recorder)
-	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, networkRegistry, warmup, pressure)
+	app.Reconnector = recovery.NewReconnector(dispatchBuffer, stations, stationCommands, recorder, timelineRecorder)
+	app.ZoneRecovery = recovery.NewZoneRecovery(networkState, networkRegistry, warmup, pressure, timelineRecorder)
+	app.Timeline = timelineRecorder
+	app.TimelineStore = timelineStore
+	timelineRecorder.SetStationResolver(func(stationID string) string {
+		item, ok := stations.Get(stationID)
+		if !ok {
+			return ""
+		}
+		return item.ZoneID
+	})
 	if err := app.seed(); err != nil {
 		return nil, err
 	}

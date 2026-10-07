@@ -48,6 +48,8 @@ func (a *App) Handler() http.Handler {
 		api.Post("/dispatch/holds", a.applyHold)
 		api.Delete("/dispatch/holds/{stationID}", a.releaseHold)
 		api.Post("/dispatch/buffer", a.bufferCommand)
+		api.Get("/timeline", a.listTimeline)
+		api.Get("/timeline/rebuild", a.rebuildTimeline)
 	})
 	return router
 }

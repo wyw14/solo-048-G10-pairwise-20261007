@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"heatpulse/internal/store"
+	"heatpulse/internal/timeline"
 )
 
 type Latches struct {
@@ -19,12 +20,13 @@ type Latches struct {
 
 type LatchStore struct {
 	snapshots *store.StationSnapshotStore
+	timeline  *timeline.Recorder
 	mu        sync.RWMutex
 	latches   map[string]Latches
 }
 
-func NewLatchStore(snapshots *store.StationSnapshotStore) *LatchStore {
-	return &LatchStore{snapshots: snapshots, latches: make(map[string]Latches)}
+func NewLatchStore(snapshots *store.StationSnapshotStore, timelineRecorder *timeline.Recorder) *LatchStore {
+	return &LatchStore{snapshots: snapshots, timeline: timelineRecorder, latches: make(map[string]Latches)}
 }
 
 func (s *LatchStore) Apply(candidate Latches) (Latches, error) {
@@ -45,7 +47,16 @@ func (s *LatchStore) Apply(candidate Latches) (Latches, error) {
 		FreezeRisk: candidate.FreezeRisk, PressureTrip: candidate.PressureTrip,
 		UpdatedAt: candidate.UpdatedAt,
 	})
-	return candidate, err
+	if err != nil {
+		return candidate, err
+	}
+	_, _ = s.timeline.RecordStation(timeline.KindProtectionLatch, candidate.StationID, candidate.StationID,
+		fmt.Sprintf("protection latches applied at revision %d", candidate.Revision),
+		timeline.LatchPayload{
+			StationID: candidate.StationID, Revision: candidate.Revision,
+			HighReturn: candidate.HighReturn, FreezeRisk: candidate.FreezeRisk, PressureTrip: candidate.PressureTrip,
+		})
+	return candidate, nil
 }
 
 func (s *LatchStore) Get(stationID string) Latches {

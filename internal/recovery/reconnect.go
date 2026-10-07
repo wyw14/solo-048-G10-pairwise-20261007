@@ -7,6 +7,7 @@ import (
 	"heatpulse/internal/audit"
 	"heatpulse/internal/dispatch"
 	"heatpulse/internal/station"
+	"heatpulse/internal/timeline"
 )
 
 type ReplayResult struct {
@@ -22,10 +23,11 @@ type Reconnector struct {
 	stations *station.Registry
 	commands *station.CommandService
 	audit    *audit.Recorder
+	timeline *timeline.Recorder
 }
 
-func NewReconnector(buffer *dispatch.Buffer, stations *station.Registry, commands *station.CommandService, recorder *audit.Recorder) *Reconnector {
-	return &Reconnector{buffer: buffer, stations: stations, commands: commands, audit: recorder}
+func NewReconnector(buffer *dispatch.Buffer, stations *station.Registry, commands *station.CommandService, recorder *audit.Recorder, timelineRecorder *timeline.Recorder) *Reconnector {
+	return &Reconnector{buffer: buffer, stations: stations, commands: commands, audit: recorder, timeline: timelineRecorder}
 }
 
 func (r *Reconnector) Reconnect(stationID string, currentEpoch uint64) (ReplayResult, error) {
@@ -55,6 +57,8 @@ func (r *Reconnector) Reconnect(stationID string, currentEpoch uint64) (ReplayRe
 	if _, err := r.stations.SetOnline(stationID, true); err != nil {
 		return result, err
 	}
+	_, _ = r.timeline.RecordStation(timeline.KindRecovery, stationID, stationID, "station replay reconciled",
+		timeline.RecoveryPayload{StationID: stationID, Phase: "reconnected", Revision: currentEpoch, Detail: fmt.Sprintf("applied %d, rejected %d buffered commands", len(result.Applied), len(result.Rejected))})
 	if err := r.audit.Accepted("recovery.reconnect", stationID, "recovery", "station replay reconciled", map[string]any{"epoch": currentEpoch, "applied": len(result.Applied), "rejected": len(result.Rejected)}); err != nil {
 		return result, err
 	}

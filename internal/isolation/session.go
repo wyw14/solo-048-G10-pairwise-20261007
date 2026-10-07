@@ -10,6 +10,7 @@ import (
 
 	"heatpulse/internal/audit"
 	"heatpulse/internal/network"
+	"heatpulse/internal/timeline"
 	"heatpulse/internal/valve"
 )
 
@@ -40,12 +41,13 @@ type Service struct {
 	relief     *valve.ReliefService
 	boundaries *valve.BoundaryService
 	audit      *audit.Recorder
+	timeline   *timeline.Recorder
 	mu         sync.RWMutex
 	sessions   map[string]Session
 }
 
-func NewService(topology *network.Topology, state *network.State, relief *valve.ReliefService, boundaries *valve.BoundaryService, recorder *audit.Recorder) *Service {
-	return &Service{topology: topology, state: state, relief: relief, boundaries: boundaries, audit: recorder, sessions: make(map[string]Session)}
+func NewService(topology *network.Topology, state *network.State, relief *valve.ReliefService, boundaries *valve.BoundaryService, recorder *audit.Recorder, timelineRecorder *timeline.Recorder) *Service {
+	return &Service{topology: topology, state: state, relief: relief, boundaries: boundaries, audit: recorder, timeline: timelineRecorder, sessions: make(map[string]Session)}
 }
 
 func (s *Service) Isolate(ctx context.Context, sectionID, actor string) (Session, error) {
@@ -58,6 +60,7 @@ func (s *Service) Isolate(ctx context.Context, sectionID, actor string) (Session
 		Status: StatusOpeningRelief, StartedAt: time.Now().UTC(), Boundaries: make([]valve.BoundaryProof, 0, len(section.BoundaryValves)),
 	}
 	s.save(session)
+	s.record(session)
 	if _, err := s.state.Update(section.ZoneID, func(zone *network.Zone) error {
 		zone.Phase = network.PhaseIsolating
 		return nil
@@ -88,6 +91,7 @@ func (s *Service) Isolate(ctx context.Context, sectionID, actor string) (Session
 	session.Status = StatusCompleted
 	session.CompletedAt = time.Now().UTC()
 	s.save(session)
+	s.record(session)
 	if err := s.audit.Accepted("isolation.complete", sectionID, actor, "section safely isolated", map[string]any{"session_id": session.ID}); err != nil {
 		return session, err
 	}
@@ -99,8 +103,18 @@ func (s *Service) fail(session Session, cause error) (Session, error) {
 	session.Error = cause.Error()
 	session.CompletedAt = time.Now().UTC()
 	s.save(session)
+	s.record(session)
 	_ = s.audit.Rejected("isolation.failed", session.SectionID, "system", cause.Error(), map[string]any{"session_id": session.ID})
 	return session, fmt.Errorf("isolation %s: %w", session.ID, cause)
+}
+
+func (s *Service) record(session Session) {
+	_, _ = s.timeline.Record(timeline.KindIsolation, session.ZoneID, session.ID,
+		fmt.Sprintf("section %s isolation %s", session.SectionID, session.Status),
+		timeline.IsolationPayload{
+			SessionID: session.ID, SectionID: session.SectionID, ZoneID: session.ZoneID,
+			Status: string(session.Status), Error: session.Error,
+		})
 }
 
 func (s *Service) save(session Session) {
